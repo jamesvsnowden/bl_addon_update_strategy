@@ -570,7 +570,7 @@ class AddonUpdatePreferences:
     update_status: EnumProperty(
         name="Status",
         description="Update status",
-        item=[
+        items=[
             ('NONE', "", ""),
             ('ERROR', "Update Error", ""),
             ('CHECKING', "Checking for update", ""),
