@@ -314,7 +314,6 @@ class AddonUpdateCheckHandler:
                 self._oncomplete(RuntimeError("Invalid server response. Context addon maintainer"))
 
     def _oncomplete(self, result: Union[Dict[str, str], Exception]) -> None:
-        self._thread.join()
         self._thread = None
         self._result = result
         if self._callback:
