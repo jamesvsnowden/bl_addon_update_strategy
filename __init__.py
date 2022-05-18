@@ -123,6 +123,7 @@ def install_update():
         return set_error(prefs, error, reinstall=(path, backup_path))
     else:
         prefs = bpy.context.preferences.addons["<ADDON>"].preferences
+        prefs["version"] = prefs.get("new_release_version", ")
         prefs["new_release_version"] = ""
         prefs["new_release_url"] = ""
         prefs["new_release_date"] = ""
@@ -287,9 +288,8 @@ class AddonUpdateCheck(Operator):
             self.report({'ERROR'}, "Invalid preferences. Contact addon maintainer")
             return {'CANCELLED'}
 
-        version = get_addon_info_value("version")
-
-        if not validate_version_tuple(version):
+        version = get_version(prefs)
+        if not version:
             return _cancel_with_error(self, prefs, "Invalid bl_info.version. Contact addon maintainer")
 
         if not _update_server:
@@ -298,7 +298,7 @@ class AddonUpdateCheck(Operator):
         params = {
             "blender_version": ".".join(map(str, bpy.app.version)),
             "addon_name": _update_module,
-            "addon_version": ".".join(map(str, version)),
+            "addon_version": version,
             "api_token": prefs.api_token,
             "include_unstable": prefs.include_unstable
             }
@@ -488,6 +488,15 @@ class AddonUpdatePreferencesOpen(Operator):
         return {'FINISHED'}
 
 
+def get_version(prefs: 'AddonUpdatePreferences') -> str:
+    value = prefs.get("version", "")
+    if not value:
+        elements = get_addon_info_value("version")
+        if validate_version_tuple(elements):
+            value = ".".join(elements)
+    return value
+
+
 class AddonUpdatePreferences:
 
     api_token: StringProperty(
@@ -582,6 +591,13 @@ class AddonUpdatePreferences:
             ],
         default='NONE',
         options={'HIDDEN'}
+        )
+
+    version: StringProperty(
+        name="Version",
+        description="Current installed version string (read-only)",
+        get=get_version,
+        options=set()
         )
 
     def _progress_icon(self) -> str:
