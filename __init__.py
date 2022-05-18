@@ -262,7 +262,7 @@ class AddonUpdateCheck(Operator):
             prefs.update_error = str(res)
             return {'CANCELLED'}
 
-        if not isinstance(res, dict) or not res.get("url") or not isinstance(res["url"], "str"):
+        if not isinstance(res, dict) or not res.get("url") or not isinstance(res["url"], str):
             prefs.update_status = 'NO_UPDATE'
             return {'CANCELLED'}
 
