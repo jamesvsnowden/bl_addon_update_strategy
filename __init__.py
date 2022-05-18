@@ -445,7 +445,7 @@ class AddonUpdateInstall(Operator):
 
         path = prefs.new_release_path
 
-        err = update_filepath_check()
+        err = update_filepath_check(path)
         if err:
             return _cancel_with_error(self, prefs, err)
 
