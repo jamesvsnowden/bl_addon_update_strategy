@@ -870,7 +870,6 @@ def _can_update() -> bool:
 
 
 CLASSES = [
-    AddonUpdateCheckHandler,
     AddonUpdateCheck,
     AddonUpdateReset,
     AddonUpdateDownload,
