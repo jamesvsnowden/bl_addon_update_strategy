@@ -203,23 +203,6 @@ def _cancel_with_error(op: Operator,
     return {'CANCELLED'}
 
 
-def _make_update_check_request(url: str,
-                               cb: Callable[[Union[Exception, Dict[str, Any]]], None]) -> None:
-    import json, urllib, urllib.request
-    try:
-        resp = urllib.request.urlopen(url)
-        data = json.loads(resp.read())
-    except Exception as err:
-        cb(err)
-    else:
-        if isinstance(data, str):
-            cb({"url": data})
-        elif isinstance(data, dict):
-            cb(data)
-        else:
-            cb(RuntimeError("Invalid server response. Contact addon maintainer"))
-
-
 def _assign_update_check_response_params(prefs: 'AddonUpdatePreferences', data: Dict[str, str]) -> None:
     prefs.new_release_date = data.get("date", "")
     prefs.new_release_notes = data.get("notes", "")
@@ -318,7 +301,7 @@ class AddonUpdateCheckHandler:
     def _run(self) -> None:
         import json, urllib, urllib.request
         try:
-            resp = urllib.request.urlopen(self.url)
+            resp = urllib.request.urlopen(self.url, timeout=60)
             data = json.loads(resp.read())
         except Exception as err:
             self._oncomplete(err)
