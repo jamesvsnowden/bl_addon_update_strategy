@@ -125,7 +125,7 @@ def install_update():
         return set_error(prefs, error, reinstall=(path, backup_path))
     else:
         prefs = bpy.context.preferences.addons["<ADDON>"].preferences
-        prefs["version"] = prefs.get("new_release_version", ")
+        prefs["version"] = prefs.get("new_release_version", "")
         prefs["new_release_version"] = ""
         prefs["new_release_url"] = ""
         prefs["new_release_date"] = ""
