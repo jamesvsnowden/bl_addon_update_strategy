@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 _update_module = ""
 _update_server = ""
-_update_script = '''
+_update_script = ''' 
 import bpy
 import addon_utils
 import os
@@ -212,7 +212,7 @@ def _send_update_download_request(op: 'AddonUpdateDownload', url: str) -> None:
             op._result = RuntimeError("Unknown error. Contact addon maintainer")
 
 
-def _get_or_create_update_script_text() -> Text:
+def _get_or_create_update_script_text() -> 'Text':
     name = f'{_update_module}_update_script'
     text = bpy.data.texts.get(name)
     if text:
