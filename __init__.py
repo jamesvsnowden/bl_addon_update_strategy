@@ -275,7 +275,7 @@ class AddonUpdateCheckHandler:
 
     def __init__(self,
                  url: str,
-                 callback: Optional[Callable[['AddonUpdateCheckHandler'], None]]) -> None:
+                 callback: Optional[Callable[['AddonUpdateCheckHandler'], None]]=None) -> None:
         self._url = url
         self._thread = None
         self._result = None
