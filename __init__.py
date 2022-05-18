@@ -1,9 +1,10 @@
 
-from typing import Any, Dict, Optional, Protocol, Set, TYPE_CHECKING, Union
+from typing import Any, Callable, Dict, Optional, Protocol, Set, TYPE_CHECKING, Type, Union
 from contextlib import suppress
 import datetime
 import zipfile
 import os
+import re
 import threading
 import urllib
 import urllib.request
@@ -18,8 +19,9 @@ if TYPE_CHECKING:
         __file__: str
         bl_info: Dict[str, Any]
 
-_update_module = ""
-_update_server = ""
+_opname_pattern = re.compile(r'(?<!^)(?=[A-Z])')
+_addon_module_name = ""
+_update_check_url = ""
 _update_script = ''' 
 import bpy
 import addon_utils
@@ -140,37 +142,51 @@ if __name__ == "__main__":
 '''
 
 
-def get_preferences(context: Optional['Context']=None) -> Optional['Preferences']:
+def _get_preferences(context: Optional['Context']=None) -> Optional['Preferences']:
     with suppress(Exception):
         context = bpy.context if context is None else context
         return context.preferences
 
 
-def get_addon_preferences(context: Optional['Context']=None) -> Optional['AddonUpdatePreferences']:
+def _get_addon_preferences(context: Optional['Context']=None) -> Optional['AddonUpdatePreferences']:
     with suppress(Exception):
-        return get_preferences(context).addons[_update_module].preferences
+        return _get_preferences(context).addons[_addon_module_name].preferences
 
 
-def get_addon_module() -> Optional['AddonModule']:
-    return next((mod for mod in addon_utils.modules() if mod.__name__ == _update_module), None)
+def _get_addon_module() -> Optional['AddonModule']:
+    return next((mod for mod in addon_utils.modules() if mod.__name__ == _addon_module_name), None)
 
 
-def get_addon_info(default: Optional[Dict[str, Any]]=None) -> Optional[Dict[str, Any]]:
-    mod = get_addon_module()
+def _get_addon_info(default: Optional[Dict[str, Any]]=None) -> Optional[Dict[str, Any]]:
+    mod = _get_addon_module()
     return mod.bl_info if mod is not None else default
 
 
-def get_addon_info_value(key: str, default: Optional[Any]=None) -> Any:
-    return get_addon_info({}).get(key, default)
+def _get_addon_info_value(key: str, default: Optional[Any]=None) -> Any:
+    return _get_addon_info({}).get(key, default)
 
 
-def validate_version_tuple(version: Any) -> bool:
+def _get_request_params(prefs: 'AddonUpdatePreferences', version: str) -> Dict[str, str]:
+    return {
+        "blender_version": ".".join(map(str, bpy.app.version)),
+        "addon_name": _addon_module_name,
+        "addon_version": version,
+        "api_token": prefs.api_token,
+        "include_unstable": str(prefs.include_unstable)
+        }
+
+
+def _encode_request_url(params: Dict[str, str]) -> str:
+    return f'{_update_check_url}?{urllib.parse.urlencode(params)}'
+
+
+def _validate_version_tuple(version: Any) -> bool:
     return (isinstance(version, (tuple, list))
             and len(version) == 3
             and all(isinstance(element, int) for element in version))
 
 
-def update_filepath_check(filepath: str) -> Optional[str]:
+def _check_update_filepath(filepath: str) -> Optional[str]:
     if not os.path.exists(filepath):
         return"Invalid update file path"
 
@@ -187,18 +203,30 @@ def _cancel_with_error(op: Operator,
     return {'CANCELLED'}
 
 
-def _send_update_check_request(op: 'AddonUpdateCheck', url: str) -> None:
+def _make_update_check_request(url: str,
+                               cb: Callable[[Union[Exception, Dict[str, Any]]], None]) -> None:
     import json, urllib, urllib.request
     try:
         resp = urllib.request.urlopen(url)
         data = json.loads(resp.read())
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as err:
-        op._result = err
+    except Exception as err:
+        cb(err)
     else:
-        op._result = data if isinstance(data, dict) else {"url": data}
-    finally:
-        if not isinstance(op._result, (Exception, dict)):
-            op._result = RuntimeError("Unknown error. Contact addon maintainer")
+        if isinstance(data, str):
+            cb({"url": data})
+        elif isinstance(data, dict):
+            cb(data)
+        else:
+            cb(RuntimeError("Invalid server response. Contact addon maintainer"))
+
+
+def _assign_update_check_response_params(prefs: 'AddonUpdatePreferences', data: Dict[str, str]) -> None:
+    prefs.new_release_date = data.get("date", "")
+    prefs.new_release_notes = data.get("notes", "")
+    prefs.new_release_url = data["url"]
+    prefs.new_release_version = data.get("version", "")
+    prefs.new_release_warning = data.get("warning", "")
+    prefs.update_status = 'AVAILABLE'
 
 
 def _send_update_download_request(op: 'AddonUpdateDownload', url: str) -> None:
@@ -215,13 +243,99 @@ def _send_update_download_request(op: 'AddonUpdateDownload', url: str) -> None:
 
 
 def _get_or_create_update_script_text() -> 'Text':
-    name = f'{_update_module}_update_script'
+    name = f'{_addon_module_name}_update_script'
     text = bpy.data.texts.get(name)
     if text:
         text.clear()
     else:
         text = bpy.data.texts.new(name)
     return text
+
+
+def _resolve_operator_function(op: Type[Operator]) -> Optional[Callable]:
+    tokens = op.bl_idname.split(".")
+    if len(tokens) == 2:
+        ns = getattr(bpy.ops, tokens[0], None)
+        if ns:
+            return getattr(ns, tokens[1], None)
+
+
+def _reset_update_status(prefs: 'AddonUpdatePreferences') -> None:
+    prefs.new_release_date = ""
+    prefs.new_release_notes = ""
+    prefs.new_release_path = ""
+    prefs.new_release_url = ""
+    prefs.new_release_version = ""
+    prefs.new_release_warning = ""
+    prefs.update_error = ""
+    prefs.update_status = 'NONE'
+
+
+class AddonUpdateCheckHandler:
+
+    def __init__(self,
+                 url: str,
+                 callback: Optional[Callable[['AddonUpdateCheckHandler'], None]]) -> None:
+        self._url = url
+        self._thread = None
+        self._result = None
+        self._callback = callback
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None
+
+    @property
+    def complete(self) -> bool:
+        return self._result is not None
+
+    @property
+    def data(self) -> Optional[Dict[str, str]]:
+        result = self._result
+        if isinstance(result, dict):
+            return result
+
+    @property
+    def result(self) -> Optional[Union[Dict[str, str], Exception]]:
+        return self._result
+
+    @property
+    def error(self) -> Optional[Exception]:
+        result = self._result
+        if isinstance(result, Exception):
+            return result
+
+    @property
+    def url(self) -> str:
+        return self._url
+
+    def run(self) -> None:
+        if not self.running and not self.complete:
+            self._thread = threading.Thread(target=self._run, args=(self,))
+            self._thread.start()
+
+    @staticmethod
+    def _run(self) -> None:
+        import json, urllib, urllib.request
+        try:
+            resp = urllib.request.urlopen(self.url)
+            data = json.loads(resp.read())
+        except Exception as err:
+            self._oncomplete(err)
+        else:
+            if isinstance(data, str):
+                self._oncomplete({"url": data})
+            elif isinstance(data, dict):
+                self._oncomplete(data)
+            else:
+                self._oncomplete(RuntimeError("Invalid server response. Context addon maintainer"))
+
+    def _oncomplete(self, result: Union[Dict[str, str], Exception]) -> None:
+        self._thread.join()
+        self._thread = None
+        self._result = result
+        if self._callback:
+            self._callback(self)
 
 
 class AddonUpdateCheck(Operator):
@@ -231,54 +345,48 @@ class AddonUpdateCheck(Operator):
     bl_options = {'INTERNAL'}
 
     _timer = None
-    _thread = None
-    _result = None
+    _handler = None
 
     @classmethod
     def poll(cls, context: 'Context') -> bool:
-        prefs = get_addon_preferences(context)
-        return prefs is not None and bool(prefs.api_token)
+        if _can_update():
+            prefs = _get_addon_preferences(context)
+            return isinstance(prefs, AddonUpdatePreferences) and bool(prefs.api_token)
+        return False
 
     def modal(self, context: 'Context', event: 'Event') -> Set[str]:
         if event.type != 'TIMER':
             return {'PASS_THROUGH'}
 
-        prefs = get_addon_preferences()
+        prefs = _get_addon_preferences()
 
         area = context.area
         if area:
             area.tag_redraw()
 
-        res = self._result
-        if res is None:
+        handler = self._handler
+        if not handler.complete is None:
             prefs.update_progress = self._timer.time_duration
             return {'PASS_THROUGH'}
 
-        self._thread.join()
-        self._thread = None
-        self._result = None
         self.cancel(context)
 
-        if isinstance(res, Exception):
+        error = handler.error
+        if error:
             prefs.update_status = 'ERROR'
-            prefs.update_error = str(res)
+            prefs.update_error = str(error)
             return {'CANCELLED'}
 
-        if not isinstance(res, dict) or not res.get("url") or not isinstance(res["url"], str):
+        data = handler.data
+        if not data.get("url", ""):
             prefs.update_status = 'NO_UPDATE'
             return {'CANCELLED'}
 
-        prefs.new_release_date = res.get("date", "")
-        prefs.new_release_notes = res.get("notes", "")
-        prefs.new_release_url = res["url"]
-        prefs.new_release_version = res.get("version", "")
-        prefs.new_release_warning = res.get("warning", "")
-        prefs.update_status = 'AVAILABLE'
-
+        _assign_update_check_response_params(prefs, data)
         return {'FINISHED'}
 
     def execute(self, context: 'Context') -> Set[str]:
-        prefs = get_addon_preferences(context)
+        prefs = _get_addon_preferences(context)
 
         if prefs is None:
             self.report({'ERROR'}, "Unable to find addon preferences")
@@ -288,20 +396,12 @@ class AddonUpdateCheck(Operator):
             self.report({'ERROR'}, "Invalid preferences. Contact addon maintainer")
             return {'CANCELLED'}
 
+        if not _update_check_url:
+            return _cancel_with_error(self, prefs, "Update server URL not found. Contact addon maintainer.")
+
         version = get_version(prefs)
         if not version:
             return _cancel_with_error(self, prefs, "Invalid bl_info.version. Contact addon maintainer")
-
-        if not _update_server:
-            return _cancel_with_error(self, prefs, "Update server URL not found. Contact addon maintainer.")
-
-        params = {
-            "blender_version": ".".join(map(str, bpy.app.version)),
-            "addon_name": _update_module,
-            "addon_version": version,
-            "api_token": prefs.api_token,
-            "include_unstable": prefs.include_unstable
-            }
 
         prefs.update_status = 'CHECKING'
         prefs.update_progress = 0.0
@@ -311,10 +411,8 @@ class AddonUpdateCheck(Operator):
             area.tag_redraw()
 
         self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
-        self._result = None
-        self._thread = threading.Thread(target=_send_update_check_request,
-                                        args=(self, f'{_update_server}?{urllib.parse.urlencode(params)}'))
-        self._thread.start()
+        self._handler = AddonUpdateCheckHandler(_encode_request_url(_get_request_params(prefs, version)))
+        self._handler.run()
 
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
@@ -323,7 +421,7 @@ class AddonUpdateCheck(Operator):
         context.window_manager.event_timer_remove(self._timer)
         self._timer = None
 
-        prefs = get_addon_preferences()
+        prefs = _get_addon_preferences()
         if prefs:
             prefs.update_progress = 0.0
 
@@ -335,16 +433,9 @@ class AddonUpdateReset(Operator):
     bl_options = {'INTERNAL'}
 
     def execute(self, context: 'Context') -> Set[str]:
-        prefs = get_addon_preferences(context)
-        if prefs:
-            prefs.new_release_date = ""
-            prefs.new_release_notes = ""
-            prefs.new_release_path = ""
-            prefs.new_release_url = ""
-            prefs.new_release_version = ""
-            prefs.new_release_warning = ""
-            prefs.update_error = ""
-            prefs.update_status = 'NONE'
+        prefs = _get_addon_preferences(context)
+        if isinstance(prefs, AddonUpdatePreferences):
+            _reset_update_status(prefs)
 
         return {'FINISHED'}
 
@@ -361,14 +452,16 @@ class AddonUpdateDownload(Operator):
 
     @classmethod
     def poll(cls, context: 'Context') -> bool:
-        prefs = get_addon_preferences(context)
-        return prefs is not None and prefs.update_status == 'AVAILABLE'
+        if _can_update():
+            prefs = _get_addon_preferences(context)
+            return isinstance(prefs, AddonUpdatePreferences) and prefs.update_status == 'AVAILABLE'
+        return False
 
     def modal(self, context: 'Context', event: 'Event') -> Set[str]:
         if event.type != 'TIMER':
             return {'PASS_THROUGH'}
 
-        prefs = get_addon_preferences(context)
+        prefs = _get_addon_preferences(context)
         prefs.update_progress = self._timer.time_duration
 
         area = context.area
@@ -396,7 +489,7 @@ class AddonUpdateDownload(Operator):
 
     def execute(self, context: 'Context') -> Set[str]:
 
-        prefs = get_addon_preferences(context)
+        prefs = _get_addon_preferences(context)
 
         if prefs is None:
             self.report({'ERROR'}, "Unable to find addon preferences")
@@ -421,7 +514,7 @@ class AddonUpdateDownload(Operator):
         context.window_manager.event_timer_remove(self._timer)
         self._timer = None
 
-        prefs = get_addon_preferences(context)
+        prefs = _get_addon_preferences(context)
         if prefs:
             prefs.update_progress = 0.0
 
@@ -434,24 +527,26 @@ class AddonUpdateInstall(Operator):
 
     @classmethod
     def poll(cls, context: 'Context') -> bool:
-        prefs = get_addon_preferences(context)
-        return isinstance(prefs, AddonUpdatePreferences) and prefs.update_status == 'READY'
+        if _can_update():
+            prefs = _get_addon_preferences(context)
+            return isinstance(prefs, AddonUpdatePreferences) and prefs.update_status == 'READY'
+        return False
 
     def execute(self, context: 'Context') -> Set[str]:
 
-        prefs = get_addon_preferences(context)
+        prefs = _get_addon_preferences(context)
         if prefs is None:
             self.report({'ERROR'}, "Unable to find addon preferences")
             return {'CANCELLED'}
 
         path = prefs.new_release_path
 
-        err = update_filepath_check(path)
+        err = _check_update_filepath(path)
         if err:
             return _cancel_with_error(self, prefs, err)
 
         text = _get_or_create_update_script_text()
-        text.write(_update_script.replace("<ADDON>", _update_module).replace("<FILEPATH>", path))
+        text.write(_update_script.replace("<ADDON>", _addon_module_name).replace("<FILEPATH>", path))
 
         try:
             context = context.copy()
@@ -463,27 +558,51 @@ class AddonUpdateInstall(Operator):
         return {'FINISHED'}
         
 
-class AddonUpdatePreferencesOpen(Operator):
+class AddonUpdateAvailable(Operator):
     bl_idname = ""
-    bl_label = "Open Preferences"
-    bl_description = "Open the addon preferences window"
+    bl_label = "Update Avavailable"
+    bl_description = "An addon update is available"
     bl_options = {'INTERNAL'}
 
+    name: StringProperty(
+        name="Name",
+        description="Name of the addon",
+        default="",
+        options=set()
+        )
+
+    @classmethod
+    def poll(cls, context: 'Context') -> bool:
+        prefs = _get_addon_preferences(context)
+        return prefs is not None and prefs.update_status == 'AVAILABLE'
+
+    def invoke(self, context: 'Context', event: 'Event') -> Set[str]:
+        self.name = _get_addon_info_value("name", "")
+        return context.window_manager.invoke_props_dialog(self)
+    
+    def draw(self, context: 'Context') -> None:
+        layout = self.layout
+        layout.separator()
+        layout.label(text=f'An update is available for {self.name}.')
+        layout.label(text="Click OK to open addon download.")
+        layout.separator()
+
     def execute(self, context: 'Context') -> Set[str]:
-        prefs = get_preferences(context)
+        prefs = _get_preferences(context)
         if prefs is None:
             self.report({'ERROR'}, "Failed to access Blender preferences")
             return {'CANCELLED'}
 
-        addon_prefs = get_addon_preferences(context)
-        if addon_prefs is None:
-            self.report({'ERROR'}, "Failed to access addon preferences")
+        download = _resolve_operator_function(AddonUpdateDownload)
+        if not download:
+            self.report({'ERROR'}, "Invalid download operator. Contact addon maintainer")
             return {'CANCELLED'}
 
         bpy.ops.sceen.userpref_show('INVOKE_DEFAULT')
         prefs.active_section = 'ADDONS'
-        bpy.ops.preferences.addon_show(module=_update_module)
-        bpy.ops.preferences.addon_expand(module=_update_module)
+        bpy.ops.preferences.addon_show(module=_addon_module_name)
+        bpy.ops.preferences.addon_expand(module=_addon_module_name)
+        download()
 
         return {'FINISHED'}
 
@@ -491,8 +610,8 @@ class AddonUpdatePreferencesOpen(Operator):
 def get_version(prefs: 'AddonUpdatePreferences') -> str:
     value = prefs.get("version", "")
     if not value:
-        elements = get_addon_info_value("version")
-        if validate_version_tuple(elements):
+        elements = _get_addon_info_value("version")
+        if _validate_version_tuple(elements):
             value = ".".join(elements)
     return value
 
@@ -721,14 +840,69 @@ class AddonUpdatePreferences:
                                  text="Update")
 
 
-def activate(name: str, url: Optional[str]="") -> None:
-    global _update_module
-    _update_module = name
-    global _update_server
-    _update_server = url
+def _on_startup_update_check_complete(handler: AddonUpdateCheckHandler) -> None:
+    prefs = _get_addon_preferences()
+    error = handler.error
+    if error:
+        _reset_update_status(prefs)
+    else:
+        _assign_update_check_response_params(prefs, handler.data)
+        func = _resolve_operator_function(AddonUpdateAvailable)
+        if func:
+            func('INVOKE_DEFAULT')
 
-def deactivate() -> None:
-    global _update_module
-    _update_module = ""
-    global _update_server
-    _update_server = ""
+
+def _on_startup():
+    if _can_update():
+        prefs = _get_addon_preferences()
+        if (prefs
+            and prefs.get("check_for_updates_on_startup", False)
+            and prefs.get("api_token", "")
+            ):
+            version = get_version(prefs)
+            if version:
+                url = _encode_request_url(_get_request_params(prefs, version))
+                AddonUpdateCheckHandler(url, _on_startup_update_check_complete).run()
+
+
+def _can_update() -> bool:
+    return bool(_addon_module_name and _update_check_url)
+
+
+CLASSES = [
+    AddonUpdateCheckHandler,
+    AddonUpdateCheck,
+    AddonUpdateReset,
+    AddonUpdateDownload,
+    AddonUpdateInstall,
+    AddonUpdateAvailable,
+    ]
+
+def register(name: str, url: Optional[str]="") -> None:
+
+    global _addon_module_name
+    _addon_module_name = name
+
+    global _update_check_url
+    _update_check_url = url
+
+    for cls in CLASSES:
+        cls.bl_idname = f'{name}.{_opname_pattern.sub("_", cls.__name__)}'
+        bpy.utils.register_class(cls)
+
+    if not bpy.app.timers.is_registered(_on_startup):
+        bpy.app.timers.register(_on_startup, first_interval=5)
+
+def unregister() -> None:
+
+    global _addon_module_name
+    _addon_module_name = ""
+
+    global _update_check_url
+    _update_check_url = ""
+
+    if bpy.app.timers.is_registered(_on_startup):
+        bpy.app.timers.unregister(_on_startup)
+
+    for cls in reversed(CLASSES):
+        bpy.utils.unregister_class(cls)
