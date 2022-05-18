@@ -612,7 +612,7 @@ def get_version(prefs: 'AddonUpdatePreferences') -> str:
     if not value:
         elements = _get_addon_info_value("version")
         if _validate_version_tuple(elements):
-            value = ".".join(elements)
+            value = ".".join(map(str, elements))
     return value
 
 
