@@ -365,7 +365,7 @@ class AddonUpdateCheck(Operator):
             area.tag_redraw()
 
         handler = self._handler
-        if not handler.complete is None:
+        if not handler.complete:
             prefs.update_progress = self._timer.time_duration
             return {'PASS_THROUGH'}
 
