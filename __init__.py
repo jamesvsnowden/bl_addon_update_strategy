@@ -886,7 +886,7 @@ def register(name: str, url: Optional[str]="") -> None:
     _update_check_url = url
 
     for cls in CLASSES:
-        cls.bl_idname = f'{name}.{_opname_pattern.sub("_", cls.__name__)}'
+        cls.bl_idname = f'{name}.{_opname_pattern.sub("_", cls.__name__).lower()}'
         bpy.utils.register_class(cls)
 
     if not bpy.app.timers.is_registered(_on_startup):
