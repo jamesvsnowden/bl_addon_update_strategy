@@ -131,6 +131,7 @@ def install_update():
         prefs["update_status"] = 0
         for key, value in props:
             prefs[key] = value
+        bpy.ops.preferences.addon_expand(module="<ADDON>")
 
 if __name__ == "__main__":
     bpy.app.timers.register(install_update, first_interval=1)
