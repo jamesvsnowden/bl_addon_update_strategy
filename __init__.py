@@ -1,5 +1,5 @@
 
-from typing import Any, Callable, Dict, Optional, Protocol, Set, TYPE_CHECKING, Type, Union
+from typing import Any, Callable, Dict, Optional, Protocol, Set, TYPE_CHECKING, Tuple, Type, Union
 from contextlib import suppress
 import datetime
 import zipfile
@@ -33,7 +33,6 @@ import tempfile
 
 PROPS = [
     ("check_for_updates_at_startup", False),
-    ("include_beta_versions", False),
     ("api_token", ""),
     ("include_unstable", False)
     ]
@@ -125,7 +124,6 @@ def install_update():
         return set_error(prefs, error, reinstall=(path, backup_path))
     else:
         prefs = bpy.context.preferences.addons["<ADDON>"].preferences
-        prefs["version"] = prefs.get("new_release_version", "")
         prefs["new_release_version"] = ""
         prefs["new_release_url"] = ""
         prefs["new_release_date"] = ""
@@ -166,11 +164,15 @@ def _get_addon_info_value(key: str, default: Optional[Any]=None) -> Any:
     return _get_addon_info({}).get(key, default)
 
 
-def _get_request_params(prefs: 'AddonUpdatePreferences', version: str) -> Dict[str, str]:
+def _version_tuple_to_string(version: Tuple[int, int, int]) -> str:
+    return ".".join(map(str, version))
+
+
+def _get_request_params(prefs: 'AddonUpdatePreferences', version: Tuple[int, int, int]) -> Dict[str, str]:
     return {
-        "blender_version": ".".join(map(str, bpy.app.version)),
+        "blender_version": _version_tuple_to_string(bpy.app.version),
         "addon_name": _addon_module_name,
-        "addon_version": version,
+        "addon_version": _version_tuple_to_string(version),
         "api_token": prefs.api_token,
         "include_unstable": str(prefs.include_unstable)
         }
@@ -381,8 +383,8 @@ class AddonUpdateCheck(Operator):
         if not _update_check_url:
             return _cancel_with_error(self, prefs, "Update server URL not found. Contact addon maintainer.")
 
-        version = get_version(prefs)
-        if not version:
+        version = _get_addon_info_value("version")
+        if not _validate_version_tuple(version):
             return _cancel_with_error(self, prefs, "Invalid bl_info.version. Contact addon maintainer")
 
         prefs.update_status = 'CHECKING'
@@ -589,15 +591,6 @@ class AddonUpdateAvailable(Operator):
         return {'FINISHED'}
 
 
-def get_version(prefs: 'AddonUpdatePreferences') -> str:
-    value = prefs.get("version", "")
-    if not value:
-        elements = _get_addon_info_value("version")
-        if _validate_version_tuple(elements):
-            value = ".".join(map(str, elements))
-    return value
-
-
 class AddonUpdatePreferences:
 
     api_token: StringProperty(
@@ -692,13 +685,6 @@ class AddonUpdatePreferences:
             ],
         default='NONE',
         options={'HIDDEN'}
-        )
-
-    version: StringProperty(
-        name="Version",
-        description="Current installed version string (read-only)",
-        get=get_version,
-        options=set()
         )
 
     def _progress_icon(self) -> str:
@@ -841,8 +827,8 @@ def _on_startup():
             and prefs.get("check_for_updates_on_startup", False)
             and prefs.get("api_token", "")
             ):
-            version = get_version(prefs)
-            if version:
+            version = _get_addon_info_value("version")
+            if _validate_version_tuple(version):
                 url = _encode_request_url(_get_request_params(prefs, version))
                 AddonUpdateCheckHandler(url, _on_startup_update_check_complete).run()
 
